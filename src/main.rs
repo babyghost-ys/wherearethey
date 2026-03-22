@@ -1,8 +1,9 @@
-use clap::Parser;
-use serde::Serialize;
+use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -29,6 +30,38 @@ struct Cli {
     /// Output as JSON
     #[arg(long)]
     json: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Output shell hook code for tracking future installs
+    Hook {
+        /// Shell type (currently only "zsh" is supported)
+        shell: String,
+    },
+    /// Show install history recorded by shell hooks
+    History {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Clear all history
+        #[arg(long)]
+        clear: bool,
+    },
+    /// (internal) Log an install event — called by the shell hooks
+    #[command(hide = true)]
+    Log {
+        /// Package manager that performed the install
+        source: String,
+        /// Action performed (install, uninstall)
+        action: String,
+        /// Package names
+        packages: Vec<String>,
+    },
 }
 
 // ── Data types ───────────────────────────────────────────────────────
@@ -70,48 +103,58 @@ fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
 // ── Homebrew ─────────────────────────────────────────────────────────
 
 fn list_brew() -> Vec<ToolInfo> {
-    let output = match run_cmd("brew", &["list", "--formula", "-1"]) {
-        Some(o) => o,
-        None => return vec![],
-    };
     let prefix = run_cmd("brew", &["--prefix"])
         .unwrap_or_else(|| "/opt/homebrew".into())
         .trim()
         .to_string();
-    let bin_dir = format!("{prefix}/bin");
+    let bin_dir = PathBuf::from(&prefix).join("bin");
 
-    output
-        .lines()
-        .filter(|l| !l.is_empty())
-        .filter_map(|formula| {
-            let bin_path = format!("{bin_dir}/{formula}");
-            if Path::new(&bin_path).exists() {
+    if !bin_dir.exists() {
+        return vec![];
+    }
+
+    // Instead of querying each formula (slow), scan the bin dir directly.
+    // Brew-installed binaries are symlinks pointing into the Cellar.
+    let cellar = format!("{prefix}/Cellar/");
+
+    let entries = match fs::read_dir(&bin_dir) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+
+    entries
+        .filter_map(|e| e.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "brew" || name.starts_with('.') {
+                return None;
+            }
+            let path = entry.path();
+            // Check if this is a symlink into the Cellar
+            let target = fs::read_link(&path).ok()?;
+            let target_str = target.to_string_lossy();
+            // Also check canonicalised path for relative symlinks
+            if target_str.contains("/Cellar/") || target_str.contains("../Cellar/") {
+                // Extract formula name from Cellar path: .../Cellar/<formula>/<version>/...
+                let canon = fs::canonicalize(&path).unwrap_or(path.clone());
+                let canon_str = canon.to_string_lossy().to_string();
+                let version = canon_str
+                    .strip_prefix(&cellar)
+                    .and_then(|rest| {
+                        let parts: Vec<&str> = rest.splitn(3, '/').collect();
+                        if parts.len() >= 2 {
+                            Some(format!("{} {}", parts[0], parts[1]))
+                        } else {
+                            None
+                        }
+                    });
                 Some(ToolInfo {
-                    name: formula.to_string(),
-                    path: bin_path,
+                    name,
+                    path: path.to_string_lossy().to_string(),
                     source: "brew".into(),
-                    version: run_cmd("brew", &["list", "--versions", formula])
-                        .map(|v| v.trim().to_string()),
+                    version,
                 })
             } else {
-                // Some formulae install binaries with different names
-                // List files in the cellar linked to bin
-                if let Some(files) = run_cmd("brew", &["list", "--formula", formula]) {
-                    for line in files.lines() {
-                        if line.contains("/bin/") {
-                            let p = Path::new(line.trim());
-                            if let Some(fname) = p.file_name() {
-                                return Some(ToolInfo {
-                                    name: fname.to_string_lossy().to_string(),
-                                    path: format!("{bin_dir}/{}", fname.to_string_lossy()),
-                                    source: "brew".into(),
-                                    version: run_cmd("brew", &["list", "--versions", formula])
-                                        .map(|v| v.trim().to_string()),
-                                });
-                            }
-                        }
-                    }
-                }
                 None
             }
         })
@@ -819,10 +862,460 @@ fn print_orphans(orphans: &[LookupResult]) {
     println!();
 }
 
+// ── Install history tracking ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InstallEvent {
+    timestamp: String,
+    source: String,
+    action: String,
+    packages: Vec<String>,
+}
+
+fn history_dir() -> PathBuf {
+    home_dir().join(".wherearethey")
+}
+
+fn history_file() -> PathBuf {
+    history_dir().join("history.json")
+}
+
+fn load_history() -> Vec<InstallEvent> {
+    let path = history_file();
+    if !path.exists() {
+        return vec![];
+    }
+    let data = fs::read_to_string(&path).unwrap_or_default();
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+fn save_history(events: &[InstallEvent]) {
+    let dir = history_dir();
+    if !dir.exists() {
+        let _ = fs::create_dir_all(&dir);
+    }
+    let json = serde_json::to_string_pretty(events).unwrap_or_default();
+    if let Ok(mut f) = fs::File::create(history_file()) {
+        let _ = f.write_all(json.as_bytes());
+    }
+}
+
+fn log_install(source: &str, action: &str, packages: &[String]) {
+    let mut history = load_history();
+    let now = run_cmd("date", &["+%Y-%m-%d %H:%M:%S"])
+        .unwrap_or_else(|| "unknown".into())
+        .trim()
+        .to_string();
+    history.push(InstallEvent {
+        timestamp: now,
+        source: source.to_string(),
+        action: action.to_string(),
+        packages: packages.to_vec(),
+    });
+    save_history(&history);
+}
+
+fn print_history(json_output: bool) {
+    let history = load_history();
+    if history.is_empty() {
+        if json_output {
+            println!("[]");
+        } else {
+            eprintln!("  {DIM}No install history recorded yet.{RESET}");
+            eprintln!("  {DIM}Add this to your ~/.zshrc to start tracking:{RESET}");
+            eprintln!("  eval \"$(wherearethey hook zsh)\"\n");
+        }
+        return;
+    }
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&history).unwrap());
+        return;
+    }
+    println!("\n  {BOLD}Install history{RESET} {DIM}({} events){RESET}\n", history.len());
+    for event in &history {
+        let colour = source_colour(&event.source);
+        let action_colour = if event.action == "uninstall" { RED } else { GREEN };
+        println!(
+            "  {DIM}{}{RESET}  {action_colour}{:<10}{RESET} {colour}{:<10}{RESET} {}",
+            event.timestamp,
+            event.action,
+            event.source,
+            event.packages.join(", ")
+        );
+    }
+    println!();
+}
+
+fn clear_history() {
+    save_history(&[]);
+    eprintln!("  {GREEN}History cleared.{RESET}");
+}
+
+// ── Shell hook generation ────────────────────────────────────────────
+
+fn generate_zsh_hook() -> String {
+    // Find the path to our own binary
+    let self_path = env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "wherearethey".into());
+
+    format!(r#"# wherearethey — shell hooks for tracking installs
+# Add to ~/.zshrc: eval "$(wherearethey hook zsh)"
+
+__wat_bin="{self_path}"
+
+# Wrap brew
+brew() {{
+    command brew "$@"
+    local exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        case "$1" in
+            install|reinstall)
+                shift
+                local pkgs=()
+                for arg in "$@"; do
+                    [[ "$arg" != -* ]] && pkgs+=("$arg")
+                done
+                [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log brew install "${{pkgs[@]}}" 2>/dev/null
+                ;;
+            uninstall|remove|rm)
+                shift
+                local pkgs=()
+                for arg in "$@"; do
+                    [[ "$arg" != -* ]] && pkgs+=("$arg")
+                done
+                [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log brew uninstall "${{pkgs[@]}}" 2>/dev/null
+                ;;
+        esac
+    fi
+    return $exit_code
+}}
+
+# Wrap npm
+npm() {{
+    command npm "$@"
+    local exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        case "$1" in
+            install|i|add)
+                if [[ " $* " == *" -g "* ]] || [[ " $* " == *" --global "* ]]; then
+                    shift
+                    local pkgs=()
+                    for arg in "$@"; do
+                        [[ "$arg" != -* ]] && pkgs+=("$arg")
+                    done
+                    [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log npm install "${{pkgs[@]}}" 2>/dev/null
+                fi
+                ;;
+            uninstall|un|remove|rm)
+                if [[ " $* " == *" -g "* ]] || [[ " $* " == *" --global "* ]]; then
+                    shift
+                    local pkgs=()
+                    for arg in "$@"; do
+                        [[ "$arg" != -* ]] && pkgs+=("$arg")
+                    done
+                    [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log npm uninstall "${{pkgs[@]}}" 2>/dev/null
+                fi
+                ;;
+        esac
+    fi
+    return $exit_code
+}}
+
+# Wrap pnpm
+pnpm() {{
+    command pnpm "$@"
+    local exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        case "$1" in
+            add)
+                if [[ " $* " == *" -g "* ]] || [[ " $* " == *" --global "* ]]; then
+                    shift
+                    local pkgs=()
+                    for arg in "$@"; do
+                        [[ "$arg" != -* ]] && pkgs+=("$arg")
+                    done
+                    [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log pnpm install "${{pkgs[@]}}" 2>/dev/null
+                fi
+                ;;
+            remove|rm)
+                if [[ " $* " == *" -g "* ]] || [[ " $* " == *" --global "* ]]; then
+                    shift
+                    local pkgs=()
+                    for arg in "$@"; do
+                        [[ "$arg" != -* ]] && pkgs+=("$arg")
+                    done
+                    [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log pnpm uninstall "${{pkgs[@]}}" 2>/dev/null
+                fi
+                ;;
+        esac
+    fi
+    return $exit_code
+}}
+
+# Wrap bun
+bun() {{
+    command bun "$@"
+    local exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        case "$1" in
+            install|add)
+                if [[ " $* " == *" -g "* ]] || [[ " $* " == *" --global "* ]]; then
+                    shift
+                    local pkgs=()
+                    for arg in "$@"; do
+                        [[ "$arg" != -* ]] && pkgs+=("$arg")
+                    done
+                    [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log bun install "${{pkgs[@]}}" 2>/dev/null
+                fi
+                ;;
+            remove|rm)
+                if [[ " $* " == *" -g "* ]] || [[ " $* " == *" --global "* ]]; then
+                    shift
+                    local pkgs=()
+                    for arg in "$@"; do
+                        [[ "$arg" != -* ]] && pkgs+=("$arg")
+                    done
+                    [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log bun uninstall "${{pkgs[@]}}" 2>/dev/null
+                fi
+                ;;
+        esac
+    fi
+    return $exit_code
+}}
+
+# Wrap cargo
+cargo() {{
+    command cargo "$@"
+    local exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        case "$1" in
+            install|binstall)
+                shift
+                local pkgs=()
+                for arg in "$@"; do
+                    [[ "$arg" != -* ]] && pkgs+=("$arg")
+                done
+                [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log cargo install "${{pkgs[@]}}" 2>/dev/null
+                ;;
+            uninstall)
+                shift
+                local pkgs=()
+                for arg in "$@"; do
+                    [[ "$arg" != -* ]] && pkgs+=("$arg")
+                done
+                [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log cargo uninstall "${{pkgs[@]}}" 2>/dev/null
+                ;;
+        esac
+    fi
+    return $exit_code
+}}
+
+# Wrap go
+go() {{
+    command go "$@"
+    local exit_code=$?
+    if [[ $exit_code -eq 0 && "$1" == "install" ]]; then
+        shift
+        local pkgs=()
+        for arg in "$@"; do
+            [[ "$arg" != -* ]] && pkgs+=("$arg")
+        done
+        [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log go install "${{pkgs[@]}}" 2>/dev/null
+    fi
+    return $exit_code
+}}
+
+# Wrap pip3 / pip
+pip3() {{
+    command pip3 "$@"
+    local exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        case "$1" in
+            install)
+                shift
+                local pkgs=()
+                for arg in "$@"; do
+                    [[ "$arg" != -* ]] && pkgs+=("$arg")
+                done
+                [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log pip install "${{pkgs[@]}}" 2>/dev/null
+                ;;
+            uninstall)
+                shift
+                local pkgs=()
+                for arg in "$@"; do
+                    [[ "$arg" != -* ]] && pkgs+=("$arg")
+                done
+                [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log pip uninstall "${{pkgs[@]}}" 2>/dev/null
+                ;;
+        esac
+    fi
+    return $exit_code
+}}
+pip() {{ pip3 "$@"; }}
+
+# Wrap pipx
+pipx() {{
+    command pipx "$@"
+    local exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        case "$1" in
+            install|inject)
+                shift
+                local pkgs=()
+                for arg in "$@"; do
+                    [[ "$arg" != -* ]] && pkgs+=("$arg")
+                done
+                [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log pipx install "${{pkgs[@]}}" 2>/dev/null
+                ;;
+            uninstall)
+                shift
+                local pkgs=()
+                for arg in "$@"; do
+                    [[ "$arg" != -* ]] && pkgs+=("$arg")
+                done
+                [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log pipx uninstall "${{pkgs[@]}}" 2>/dev/null
+                ;;
+        esac
+    fi
+    return $exit_code
+}}
+
+# Wrap uv
+uv() {{
+    command uv "$@"
+    local exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        if [[ "$1" == "tool" ]]; then
+            case "$2" in
+                install)
+                    shift 2
+                    local pkgs=()
+                    for arg in "$@"; do
+                        [[ "$arg" != -* ]] && pkgs+=("$arg")
+                    done
+                    [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log uv install "${{pkgs[@]}}" 2>/dev/null
+                    ;;
+                uninstall)
+                    shift 2
+                    local pkgs=()
+                    for arg in "$@"; do
+                        [[ "$arg" != -* ]] && pkgs+=("$arg")
+                    done
+                    [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log uv uninstall "${{pkgs[@]}}" 2>/dev/null
+                    ;;
+            esac
+        fi
+    fi
+    return $exit_code
+}}
+
+# Wrap gem
+gem() {{
+    command gem "$@"
+    local exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        case "$1" in
+            install)
+                shift
+                local pkgs=()
+                for arg in "$@"; do
+                    [[ "$arg" != -* ]] && pkgs+=("$arg")
+                done
+                [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log gem install "${{pkgs[@]}}" 2>/dev/null
+                ;;
+            uninstall)
+                shift
+                local pkgs=()
+                for arg in "$@"; do
+                    [[ "$arg" != -* ]] && pkgs+=("$arg")
+                done
+                [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log gem uninstall "${{pkgs[@]}}" 2>/dev/null
+                ;;
+        esac
+    fi
+    return $exit_code
+}}
+
+# Wrap deno
+deno() {{
+    command deno "$@"
+    local exit_code=$?
+    if [[ $exit_code -eq 0 && "$1" == "install" ]]; then
+        shift
+        local pkgs=()
+        for arg in "$@"; do
+            [[ "$arg" != -* ]] && pkgs+=("$arg")
+        done
+        [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log deno install "${{pkgs[@]}}" 2>/dev/null
+    fi
+    return $exit_code
+}}
+
+# Wrap composer
+composer() {{
+    command composer "$@"
+    local exit_code=$?
+    if [[ $exit_code -eq 0 && "$1" == "global" ]]; then
+        case "$2" in
+            require)
+                shift 2
+                local pkgs=()
+                for arg in "$@"; do
+                    [[ "$arg" != -* ]] && pkgs+=("$arg")
+                done
+                [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log composer install "${{pkgs[@]}}" 2>/dev/null
+                ;;
+            remove)
+                shift 2
+                local pkgs=()
+                for arg in "$@"; do
+                    [[ "$arg" != -* ]] && pkgs+=("$arg")
+                done
+                [[ ${{#pkgs[@]}} -gt 0 ]] && "$__wat_bin" log composer uninstall "${{pkgs[@]}}" 2>/dev/null
+                ;;
+        esac
+    fi
+    return $exit_code
+}}
+"#)
+}
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 fn main() {
     let cli = Cli::parse();
+
+    // Handle subcommands first
+    if let Some(ref cmd) = cli.command {
+        match cmd {
+            Commands::Hook { shell } => {
+                if shell != "zsh" {
+                    eprintln!("  {RED}Only 'zsh' is supported for now.{RESET}");
+                    eprintln!("  Usage: eval \"$(wherearethey hook zsh)\"");
+                    std::process::exit(1);
+                }
+                print!("{}", generate_zsh_hook());
+                return;
+            }
+            Commands::History { json, clear } => {
+                if *clear {
+                    clear_history();
+                } else {
+                    print_history(*json);
+                }
+                return;
+            }
+            Commands::Log {
+                source,
+                action,
+                packages,
+            } => {
+                log_install(source, action, packages);
+                return;
+            }
+        }
+    }
 
     // Single binary lookup
     if let Some(ref name) = cli.binary {
@@ -883,10 +1376,15 @@ fn main() {
     // No args — print help
     eprintln!("{BOLD}wherearethey{RESET} — find where your CLI tools were installed from\n");
     eprintln!("Usage:");
-    eprintln!("  wherearethey <binary>    Look up a specific tool");
-    eprintln!("  wherearethey --all       List all tools by source");
-    eprintln!("  wherearethey --orphans   Find unclaimed binaries");
-    eprintln!("  wherearethey --json      Output as JSON\n");
+    eprintln!("  wherearethey <binary>       Look up a specific tool");
+    eprintln!("  wherearethey --all          List all tools by source");
+    eprintln!("  wherearethey --orphans      Find unclaimed binaries");
+    eprintln!("  wherearethey --json         Output as JSON");
+    eprintln!("  wherearethey hook zsh       Output shell hooks for tracking");
+    eprintln!("  wherearethey history        Show tracked install history");
+    eprintln!("  wherearethey history --clear  Clear history\n");
+    eprintln!("Setup tracking:");
+    eprintln!("  eval \"$(wherearethey hook zsh)\"   # add to ~/.zshrc\n");
     eprintln!("Examples:");
     eprintln!("  wherearethey ffmpeg");
     eprintln!("  wherearethey rg");
