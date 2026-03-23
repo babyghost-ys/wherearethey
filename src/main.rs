@@ -1,3 +1,4 @@
+mod aliases;
 mod detect;
 mod history;
 mod hooks;
@@ -10,6 +11,7 @@ use std::collections::BTreeSet;
 
 use clap::{Parser, Subcommand};
 
+use crate::aliases::{list_aliases, remove_alias, resolve_alias, set_alias};
 use crate::detect::{lookup_binary, lookup_binary_fast};
 use crate::history::{clear_history, log_install, print_history};
 use crate::hooks::generate_zsh_hook;
@@ -22,10 +24,12 @@ use crate::output::*;
 #[command(
     name = "wherearethey",
     about = "Find where your CLI tools were installed from",
-    version
+    version,
+    disable_help_flag = true,
+    disable_help_subcommand = true
 )]
 struct Cli {
-    /// Binary name to look up (e.g. "ffmpeg", "rg", "node")
+    /// Binary or friendly name to look up (e.g. "ffmpeg", "rg", "Gemini")
     binary: Option<String>,
 
     /// List all detected CLI tools grouped by source
@@ -39,6 +43,10 @@ struct Cli {
     /// Output as JSON
     #[arg(long)]
     json: bool,
+
+    /// Print help
+    #[arg(short, long)]
+    help: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -71,12 +79,52 @@ enum Commands {
         /// Package names
         packages: Vec<String>,
     },
+    /// Give a binary a friendly name for easy lookup
+    Name {
+        /// Binary name (e.g. "gemini-cli")
+        binary: Option<String>,
+        /// Friendly name (e.g. "Gemini")
+        friendly_name: Option<String>,
+        /// List all aliases
+        #[arg(long)]
+        list: bool,
+        /// Remove an alias by friendly name
+        #[arg(long)]
+        remove: Option<String>,
+    },
 }
 
 // ── Main ─────────────────────────────────────────────────────────────
 
+fn print_help() {
+    eprintln!("{BOLD}wherearethey{RESET} — find where your CLI tools were installed from\n");
+    eprintln!("Usage:");
+    eprintln!("  wherearethey <name>            Look up by binary or friendly name");
+    eprintln!("  wherearethey --all             List all tools by source");
+    eprintln!("  wherearethey --orphans         Find unclaimed binaries");
+    eprintln!("  wherearethey --json            Output as JSON");
+    eprintln!("  wherearethey hook zsh          Output shell hooks for tracking");
+    eprintln!("  wherearethey history           Show tracked install history");
+    eprintln!("  wherearethey history --clear   Clear history");
+    eprintln!("  wherearethey name <b> <name>   Give a binary a friendly name");
+    eprintln!("  wherearethey name --list       List all friendly names");
+    eprintln!("  wherearethey name --remove <n> Remove a friendly name\n");
+    eprintln!("Setup tracking:");
+    eprintln!("  eval \"$(wherearethey hook zsh)\"    # add to ~/.zshrc\n");
+    eprintln!("Examples:");
+    eprintln!("  wherearethey ffmpeg");
+    eprintln!("  wherearethey name gemini-cli Gemini");
+    eprintln!("  wherearethey Gemini");
+    eprintln!("  wherearethey --all --json\n");
+}
+
 fn main() {
     let cli = Cli::parse();
+
+    if cli.help {
+        print_help();
+        return;
+    }
 
     // Handle subcommands first
     if let Some(ref cmd) = cli.command {
@@ -106,22 +154,59 @@ fn main() {
                 log_install(source, action, packages);
                 return;
             }
+            Commands::Name {
+                binary,
+                friendly_name,
+                list,
+                remove,
+            } => {
+                if *list {
+                    list_aliases();
+                } else if let Some(name) = remove {
+                    remove_alias(name);
+                } else if let (Some(bin), Some(name)) = (binary, friendly_name) {
+                    set_alias(bin, name);
+                } else {
+                    eprintln!("  {RED}Usage: wherearethey name <binary> <friendly-name>{RESET}");
+                    eprintln!("  {DIM}Example: wherearethey name gemini-cli Gemini{RESET}");
+                    std::process::exit(1);
+                }
+                return;
+            }
         }
     }
 
-    // Single binary lookup
+    // Single binary lookup (resolve alias first)
     if let Some(ref name) = cli.binary {
         if !cli.all && !cli.orphans {
-            match lookup_binary(name) {
+            let resolved = resolve_alias(name).unwrap_or_else(|| name.clone());
+            let display_alias = if resolved != *name {
+                Some(name.as_str())
+            } else {
+                None
+            };
+            match lookup_binary(&resolved) {
                 Some(result) => {
                     if cli.json {
                         println!("{}", serde_json::to_string_pretty(&result).unwrap());
                     } else {
+                        if let Some(alias) = display_alias {
+                            eprintln!(
+                                "  {DIM}Alias \"{alias}\" → {}{RESET}\n",
+                                result.binary
+                            );
+                        }
                         print_lookup(&result);
                     }
                 }
                 None => {
-                    eprintln!("  {RED}'{name}' not found in PATH{RESET}");
+                    if display_alias.is_some() {
+                        eprintln!(
+                            "  {RED}'{resolved}' (alias for \"{name}\") not found in PATH{RESET}"
+                        );
+                    } else {
+                        eprintln!("  {RED}'{name}' not found in PATH{RESET}");
+                    }
                     std::process::exit(1);
                 }
             }
@@ -177,19 +262,5 @@ fn main() {
     }
 
     // No args — print help
-    eprintln!("{BOLD}wherearethey{RESET} — find where your CLI tools were installed from\n");
-    eprintln!("Usage:");
-    eprintln!("  wherearethey <binary>       Look up a specific tool");
-    eprintln!("  wherearethey --all          List all tools by source");
-    eprintln!("  wherearethey --orphans      Find unclaimed binaries");
-    eprintln!("  wherearethey --json         Output as JSON");
-    eprintln!("  wherearethey hook zsh       Output shell hooks for tracking");
-    eprintln!("  wherearethey history        Show tracked install history");
-    eprintln!("  wherearethey history --clear  Clear history\n");
-    eprintln!("Setup tracking:");
-    eprintln!("  eval \"$(wherearethey hook zsh)\"   # add to ~/.zshrc\n");
-    eprintln!("Examples:");
-    eprintln!("  wherearethey ffmpeg");
-    eprintln!("  wherearethey rg");
-    eprintln!("  wherearethey --all --json\n");
+    print_help();
 }

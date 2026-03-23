@@ -43,13 +43,16 @@ eval "$(wherearethey hook zsh)"
 ## Usage
 
 ```sh
-wherearethey ffmpeg          # Look up a single binary
-wherearethey --all           # List every detected tool, grouped by source
-wherearethey --orphans       # Find binaries no package manager claims
-wherearethey --json          # Output as JSON (combine with any flag above)
-wherearethey hook zsh        # Print shell hooks for install tracking
-wherearethey history         # Show tracked install history
-wherearethey history --clear # Clear history
+wherearethey ffmpeg              # Look up a single binary
+wherearethey --all               # List every detected tool, grouped by source
+wherearethey --orphans           # Find binaries no package manager claims
+wherearethey --json              # Output as JSON (combine with any flag above)
+wherearethey hook zsh            # Print shell hooks for install tracking
+wherearethey history             # Show tracked install history
+wherearethey history --clear     # Clear history
+wherearethey name <bin> <name>   # Give a binary a friendly name
+wherearethey name --list         # List all friendly names
+wherearethey name --remove <n>   # Remove a friendly name
 ```
 
 ### Example
@@ -63,6 +66,17 @@ $ wherearethey ffmpeg
   source:  brew
   version: ffmpeg 7.1.1
 ```
+
+### Friendly names
+
+Give binaries human-readable names so you can look them up without remembering the exact package name:
+
+```sh
+wherearethey name gemini-cli Gemini
+wherearethey Gemini   # looks up gemini-cli
+```
+
+Names are stored in `~/.wherearethey/aliases.json` and matched case-insensitively.
 
 ### Shell hooks (optional)
 
