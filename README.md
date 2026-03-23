@@ -2,76 +2,25 @@
 
 Find where your CLI tools were installed from.
 
-Ever typed `which ffmpeg` and got `/opt/homebrew/bin/ffmpeg` but still had no idea which package manager put it there? **wherearethey** resolves that. Point it at any binary and it tells you the source — brew, cargo, npm, pip, go, and 13 more.
+```
+$ wherearethey '*cli*'
 
-## Install
+  Pattern "*cli*" — 7 matches
 
-### Homebrew (recommended)
+  gemini-cli
+  source:  npm
 
-```sh
-brew tap babyghost-ys/tap
-brew install wherearethey
+  gnutls-cli
+  source:  brew
+  version: gnutls-cli 3.8.10
+
+  huggingface-cli
+  source:  unknown
+  version: huggingface_hub version: 0.29.1
+  ...
 ```
 
-No Rust required — this downloads a pre-built binary.
-
-### From source (requires Rust)
-
-```sh
-# Install Rust if you haven't already
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Clone and build
-git clone https://github.com/babyghost-ys/wherearethey.git
-cd wherearethey
-cargo install --path .
-```
-
-The binary lands in `~/.cargo/bin/wherearethey`. Make sure `~/.cargo/bin` is in your `PATH`.
-
-### Uninstall (Homebrew)
-
-```sh
-brew uninstall wherearethey
-brew untap babyghost-ys/tap  # optional, removes the tap
-```
-
-### Uninstall (from source)
-
-```sh
-cargo uninstall wherearethey
-```
-
-After uninstalling (either method), you can also remove tracked data:
-
-```sh
-rm -rf ~/.wherearethey
-```
-
-If you added the shell hook to `~/.zshrc`, remove this line:
-
-```sh
-eval "$(wherearethey hook zsh)"
-```
-
----
-
-## Usage
-
-```sh
-wherearethey ffmpeg              # Look up a single binary
-wherearethey --all               # List every detected tool, grouped by source
-wherearethey --unmanaged         # Find binaries not managed by any package manager
-wherearethey --json              # Output as JSON (combine with any flag above)
-wherearethey hook zsh            # Print shell hooks for install tracking
-wherearethey history             # Show tracked install history
-wherearethey history --clear     # Clear history
-wherearethey name <bin> <name>   # Give a binary a friendly name
-wherearethey name --list         # List all friendly names
-wherearethey name --remove <n>   # Remove a friendly name
-```
-
-### Example
+Don't remember the exact name? Use wildcards. `wherearethey '*cli*'` searches binary names, package manager tool names, and your aliases all at once.
 
 ```
 $ wherearethey ffmpeg
@@ -83,85 +32,110 @@ $ wherearethey ffmpeg
   version: ffmpeg 7.1.1
 ```
 
+Know the exact name? Get the full breakdown — path, symlink target, source, and version.
+
+---
+
+## Quick start
+
+```sh
+# Homebrew (recommended)
+brew tap babyghost-ys/tap
+brew install wherearethey
+
+# Or from source (requires Rust)
+git clone https://github.com/babyghost-ys/wherearethey.git
+cd wherearethey && cargo install --path .
+```
+
+---
+
+## Usage
+
+```sh
+wherearethey ffmpeg              # Look up a single binary
+wherearethey '*cli*'             # Wildcard: find all matching tools
+wherearethey 'cargo-*'           # Wildcard: all cargo subcommands
+wherearethey Gemini              # Look up by friendly name (alias)
+wherearethey --all               # List every tool, grouped by source
+wherearethey --unmanaged         # Find binaries no package manager claims
+wherearethey --json              # JSON output (works with any of the above)
+```
+
+### Wildcard search
+
+Use `*` (any characters) and `?` (single character) to search by pattern. Quote the pattern so your shell doesn't expand it.
+
+Wildcard search matches against:
+
+- Binary names in your `$PATH`
+- Package/tool names from all 18 supported package managers
+- Friendly names (aliases) you've set
+
 ### Friendly names
 
-Give binaries human-readable names so you can look them up without remembering the exact package name:
+Give binaries memorable names:
 
 ```sh
 wherearethey name gemini-cli Gemini
-wherearethey Gemini   # looks up gemini-cli
+wherearethey Gemini              # now looks up gemini-cli
 ```
 
-Names are stored in `~/.wherearethey/aliases.json` and matched case-insensitively.
+Manage them with `name --list` and `name --remove <name>`. Stored in `~/.wherearethey/aliases.json`, matched case-insensitively.
 
-### Shell hooks (optional)
+### Install tracking
 
-Track future installs automatically by adding this to your `~/.zshrc`:
+Optionally track future installs by adding this to `~/.zshrc`:
 
 ```sh
 eval "$(wherearethey hook zsh)"
 ```
 
-This wraps common package manager commands (brew, npm, cargo, pip, etc.) so every install and uninstall is logged to `~/.wherearethey/history.json`. View with `wherearethey history`.
+This wraps brew, npm, cargo, pip, and other commands so every install/uninstall is logged. View with `wherearethey history`, clear with `wherearethey history --clear`.
 
 ---
 
-## Supported package managers
+## Supported sources (18 package managers + 10 path-based)
 
-| # | Source | Detection method |
-|---|--------|-----------------|
-| 1 | **Homebrew** | Scans `/opt/homebrew/bin` symlinks into Cellar |
-| 2 | **npm** (global) | `npm list -g --parseable` |
-| 3 | **pnpm** (global) | `pnpm list -g --parseable` |
-| 4 | **Bun** (global) | Scans `~/.bun/bin` |
-| 5 | **Deno** | Scans `~/.deno/bin` |
-| 6 | **Cargo** (Rust) | `cargo install --list` |
-| 7 | **Go** | Scans `$GOBIN` or `~/go/bin` |
-| 8 | **pipx** | `pipx list --short` |
-| 9 | **uv** | `uv tool list` |
-| 10 | **pip** (user) | `pip3 list --user --format=json` |
-| 11 | **Ruby gems** | `gem list --local` |
-| 12 | **Composer** (PHP) | Scans `~/.composer/vendor/bin` |
-| 13 | **.NET tools** | Scans `~/.dotnet/tools` |
-| 14 | **Nix** | Scans `~/.nix-profile/bin` |
-| 15 | **MacPorts** | `port installed` |
-| 16 | **Conda** | `conda list --json` |
-| 17 | **mise** | `mise list --current --json` |
-| 18 | **gh extensions** | `gh extension list` |
+**Scanned by `--all` and wildcard search:**
+Homebrew, npm, pnpm, Bun, Deno, Cargo, Go, pipx, uv, pip, Ruby gems, Composer, .NET tools, Nix, MacPorts, Conda, mise, gh extensions
 
-Single-binary lookups also detect these via path heuristics (no scanning required):
-
-| Source | Detected from path containing |
-|--------|-------------------------------|
-| rustup | `/rustup` |
-| asdf | `/.asdf/` |
-| nvm | `/.nvm/` |
-| proto | `/.proto/` |
-| sdkman | `/.sdkman/` |
-| ghcup | `/.ghcup/` |
-| pkgx | `/.pkgx/` |
-| Mint | `/.mint/bin` |
-| Xcode CLT | `/Library/Developer/CommandLineTools/` |
-| macOS system | `/usr/bin` |
+**Detected by path heuristics (single lookups):**
+rustup, asdf, nvm, proto, sdkman, ghcup, pkgx, Mint, Xcode CLT, macOS system
 
 ---
 
 ## How it works
 
-1. **Single lookup** (`wherearethey rg`) — resolves the binary with `which`, follows symlinks, and matches the resolved path against known install locations.
-2. **Full scan** (`--all`) — queries each package manager's own listing command and scans known bin directories.
-3. **Unmanaged detection** (`--unmanaged`) — compares every binary in `$PATH` against the full scan results; anything unclaimed is not managed by any known package manager.
-4. **Install tracking** (`hook zsh`) — shell function wrappers intercept install/uninstall commands and log them to `~/.wherearethey/history.json`.
+1. **Single lookup** — resolves the binary with `which`, follows symlinks, and matches the path against known install locations.
+2. **Wildcard search** — scans PATH, queries all package managers, and checks aliases for pattern matches.
+3. **Full scan** (`--all`) — queries each package manager and scans known bin directories.
+4. **Unmanaged** (`--unmanaged`) — compares every PATH binary against the full scan; anything unclaimed is flagged.
+5. **Tracking** (`hook zsh`) — shell wrappers log install/uninstall events to `~/.wherearethey/history.json`.
+
+---
+
+## Uninstall
+
+```sh
+# Homebrew
+brew uninstall wherearethey
+brew untap babyghost-ys/tap       # optional
+
+# From source
+cargo uninstall wherearethey
+```
+
+Remove tracked data: `rm -rf ~/.wherearethey`
+Remove the shell hook line from `~/.zshrc` if added.
 
 ---
 
 ## Requirements
 
-- macOS (tested on Apple Silicon and Intel)
-- Rust 2024 edition (for building from source)
-
----
+- macOS (Apple Silicon and Intel)
+- Rust 2024 edition (building from source only)
 
 ## Licence
 
-GPL-3.0 — see [LICENSE](LICENSE) for details.
+GPL-3.0 — see [LICENSE](LICENSE).
