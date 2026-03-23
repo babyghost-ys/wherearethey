@@ -11,12 +11,14 @@ use std::collections::BTreeSet;
 
 use clap::{Parser, Subcommand};
 
-use crate::aliases::{list_aliases, remove_alias, resolve_alias, set_alias};
+use crate::aliases::{all_aliases, list_aliases, remove_alias, resolve_alias, set_alias};
 use crate::detect::{lookup_binary, lookup_binary_fast};
 use crate::history::{clear_history, log_install, print_history};
 use crate::hooks::generate_zsh_hook;
-use crate::managers::{get_all_path_binaries, scan_all};
+use crate::managers::{get_all_path_binaries, scan_all, scan_all_quiet};
+use crate::util::glob_matches;
 use crate::output::*;
+use crate::types::LookupResult;
 
 // ── CLI ──────────────────────────────────────────────────────────────
 
@@ -99,7 +101,7 @@ enum Commands {
 fn print_help() {
     eprintln!("{BOLD}wherearethey{RESET} — find where your CLI tools were installed from\n");
     eprintln!("Usage:");
-    eprintln!("  wherearethey <name>            Look up by binary or friendly name");
+    eprintln!("  wherearethey <name>            Look up by binary, alias, or pattern");
     eprintln!("  wherearethey --all             List all tools by source");
     eprintln!("  wherearethey --unmanaged       Find unmanaged binaries");
     eprintln!("  wherearethey --json            Output as JSON");
@@ -113,6 +115,8 @@ fn print_help() {
     eprintln!("  eval \"$(wherearethey hook zsh)\"    # add to ~/.zshrc\n");
     eprintln!("Examples:");
     eprintln!("  wherearethey ffmpeg");
+    eprintln!("  wherearethey 'cl*'            Glob: all binaries starting with cl");
+    eprintln!("  wherearethey '*cli*'          Glob: all binaries containing cli");
     eprintln!("  wherearethey name gemini-cli Gemini");
     eprintln!("  wherearethey Gemini");
     eprintln!("  wherearethey --all --json\n");
@@ -176,9 +180,80 @@ fn main() {
         }
     }
 
-    // Single binary lookup (resolve alias first)
+    // Single binary lookup (resolve alias first, or glob search)
     if let Some(ref name) = cli.binary {
         if !cli.all && !cli.unmanaged {
+            // Glob pattern search
+            if name.contains('*') || name.contains('?') {
+                eprint!("  {DIM}Searching...{RESET}");
+
+                let mut seen: BTreeSet<String> = BTreeSet::new();
+                let mut results = Vec::new();
+
+                // Match binary names from PATH
+                let all_binaries = get_all_path_binaries();
+                for b in &all_binaries {
+                    if glob_matches(name, b) {
+                        if seen.insert(b.clone()) {
+                            if let Some(r) = lookup_binary(b) {
+                                results.push(r);
+                            }
+                        }
+                    }
+                }
+
+                // Match tool names from package managers (e.g. npm
+                // package "gemini-cli" installs binary "gemini")
+                let tools = scan_all_quiet();
+                for tool in &tools {
+                    if glob_matches(name, &tool.name) && !seen.contains(&tool.name) {
+                        seen.insert(tool.name.clone());
+                        results.push(LookupResult {
+                            binary: tool.name.clone(),
+                            resolved_path: tool.path.clone(),
+                            source: tool.source.clone(),
+                            symlink_target: None,
+                            version: tool.version.clone(),
+                        });
+                    }
+                }
+
+                // Match alias friendly names
+                let aliases = all_aliases();
+                for (friendly, binary) in &aliases {
+                    if glob_matches(name, friendly) && !seen.contains(friendly) {
+                        seen.insert(friendly.clone());
+                        if let Some(mut r) = lookup_binary(binary) {
+                            r.binary = format!("{friendly} → {binary}");
+                            results.push(r);
+                        }
+                    }
+                }
+
+                // Clear the "Searching..." line
+                eprint!("\r                    \r");
+
+                results.sort_by(|a, b| a.binary.cmp(&b.binary));
+
+                if results.is_empty() {
+                    eprintln!("  {RED}No tools matching '{name}' found{RESET}");
+                    std::process::exit(1);
+                }
+
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&results).unwrap());
+                } else {
+                    eprintln!(
+                        "\n  {BOLD}Pattern \"{name}\"{RESET} {DIM}— {} matches{RESET}",
+                        results.len()
+                    );
+                    for result in &results {
+                        print_lookup(result);
+                    }
+                }
+                return;
+            }
+
             let resolved = resolve_alias(name).unwrap_or_else(|| name.clone());
             let display_alias = if resolved != *name {
                 Some(name.as_str())

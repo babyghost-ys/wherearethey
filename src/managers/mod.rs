@@ -465,6 +465,14 @@ fn list_gh_extensions() -> Vec<ToolInfo> {
 // ── Scan all package managers ────────────────────────────────────────
 
 pub fn scan_all() -> Vec<ToolInfo> {
+    scan_all_inner(false)
+}
+
+pub fn scan_all_quiet() -> Vec<ToolInfo> {
+    scan_all_inner(true)
+}
+
+fn scan_all_inner(quiet: bool) -> Vec<ToolInfo> {
     let mut all_tools = Vec::new();
 
     let managers: Vec<(&str, fn() -> Vec<ToolInfo>)> = vec![
@@ -489,9 +497,13 @@ pub fn scan_all() -> Vec<ToolInfo> {
     ];
 
     for (name, list_fn) in &managers {
-        eprint!("  scanning {name}...");
+        if !quiet {
+            eprint!("  scanning {name}...");
+        }
         let tools = list_fn();
-        eprintln!(" {} found", tools.len());
+        if !quiet {
+            eprintln!(" {} found", tools.len());
+        }
         all_tools.extend(tools);
     }
 

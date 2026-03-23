@@ -73,3 +73,8 @@ pub fn resolve_alias(name: &str) -> Option<String> {
     let aliases = load_aliases();
     aliases.get(&name.to_lowercase()).cloned()
 }
+
+/// Return all aliases (friendly_name → binary_name).
+pub fn all_aliases() -> BTreeMap<String, String> {
+    load_aliases()
+}
