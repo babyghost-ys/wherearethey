@@ -183,6 +183,18 @@ fn main() {
     // Single binary lookup (resolve alias first, or glob search)
     if let Some(ref name) = cli.binary {
         if !cli.all && !cli.unmanaged {
+            // Treat bare "*" the same as --all
+            if name == "*" {
+                eprintln!("\n{BOLD}Scanning package managers...{RESET}\n");
+                let tools = scan_all();
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&tools).unwrap());
+                } else {
+                    print_all(&tools);
+                }
+                return;
+            }
+
             // Glob pattern search
             if name.contains('*') || name.contains('?') {
                 eprint!("  {DIM}Searching...{RESET}");
