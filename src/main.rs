@@ -38,7 +38,7 @@ struct Cli {
 
     /// Show binaries in PATH that no package manager claims
     #[arg(long)]
-    orphans: bool,
+    unmanaged: bool,
 
     /// Output as JSON
     #[arg(long)]
@@ -101,7 +101,7 @@ fn print_help() {
     eprintln!("Usage:");
     eprintln!("  wherearethey <name>            Look up by binary or friendly name");
     eprintln!("  wherearethey --all             List all tools by source");
-    eprintln!("  wherearethey --orphans         Find unclaimed binaries");
+    eprintln!("  wherearethey --unmanaged       Find unmanaged binaries");
     eprintln!("  wherearethey --json            Output as JSON");
     eprintln!("  wherearethey hook zsh          Output shell hooks for tracking");
     eprintln!("  wherearethey history           Show tracked install history");
@@ -178,7 +178,7 @@ fn main() {
 
     // Single binary lookup (resolve alias first)
     if let Some(ref name) = cli.binary {
-        if !cli.all && !cli.orphans {
+        if !cli.all && !cli.unmanaged {
             let resolved = resolve_alias(name).unwrap_or_else(|| name.clone());
             let display_alias = if resolved != *name {
                 Some(name.as_str())
@@ -226,8 +226,8 @@ fn main() {
         return;
     }
 
-    // --orphans: find unclaimed binaries
-    if cli.orphans {
+    // --unmanaged: find binaries not managed by any package manager
+    if cli.unmanaged {
         eprintln!("\n{BOLD}Scanning package managers...{RESET}\n");
         let tools = scan_all();
         let claimed: BTreeSet<String> = tools.iter().map(|t| t.name.clone()).collect();
@@ -240,23 +240,23 @@ fn main() {
         let total = unclaimed.len();
         eprintln!("\n  {DIM}Checking {total} unclaimed binaries...{RESET}");
 
-        let mut orphans = Vec::new();
+        let mut unmanaged = Vec::new();
         for (i, b) in unclaimed.iter().enumerate() {
             if (i + 1) % 50 == 0 || i + 1 == total {
                 eprint!("\r  {DIM}Checked {}/{total}...{RESET}  ", i + 1);
             }
             if let Some(r) = lookup_binary_fast(b) {
                 if r.source == "unknown" {
-                    orphans.push(r);
+                    unmanaged.push(r);
                 }
             }
         }
         eprintln!();
 
         if cli.json {
-            println!("{}", serde_json::to_string_pretty(&orphans).unwrap());
+            println!("{}", serde_json::to_string_pretty(&unmanaged).unwrap());
         } else {
-            print_orphans(&orphans);
+            print_unmanaged(&unmanaged);
         }
         return;
     }

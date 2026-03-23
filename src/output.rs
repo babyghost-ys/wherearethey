@@ -61,24 +61,24 @@ pub fn print_all(tools: &[ToolInfo]) {
     println!();
 }
 
-pub fn print_orphans(orphans: &[LookupResult]) {
-    if orphans.is_empty() {
-        println!("\n  {GREEN}No orphan binaries found. Everything is claimed.{RESET}\n");
+pub fn print_unmanaged(items: &[LookupResult]) {
+    if items.is_empty() {
+        println!("\n  {GREEN}No unmanaged binaries found. Everything is claimed.{RESET}\n");
         return;
     }
     println!(
-        "\n  {YELLOW}{BOLD}Orphans{RESET} {DIM}({} binaries no package manager claims){RESET}\n",
-        orphans.len()
+        "\n  {YELLOW}{BOLD}Unmanaged{RESET} {DIM}({} binaries not managed by any package manager){RESET}\n",
+        items.len()
     );
-    for orphan in orphans {
-        let target_info = orphan
+    for item in items {
+        let target_info = item
             .symlink_target
             .as_deref()
             .map(|t| format!(" {DIM}-> {t}{RESET}"))
             .unwrap_or_default();
         println!(
             "    {YELLOW}{}{RESET}  {DIM}{}{RESET}{target_info}",
-            orphan.binary, orphan.resolved_path
+            item.binary, item.resolved_path
         );
     }
     println!();

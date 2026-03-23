@@ -45,7 +45,7 @@ eval "$(wherearethey hook zsh)"
 ```sh
 wherearethey ffmpeg              # Look up a single binary
 wherearethey --all               # List every detected tool, grouped by source
-wherearethey --orphans           # Find binaries no package manager claims
+wherearethey --unmanaged         # Find binaries not managed by any package manager
 wherearethey --json              # Output as JSON (combine with any flag above)
 wherearethey hook zsh            # Print shell hooks for install tracking
 wherearethey history             # Show tracked install history
@@ -134,7 +134,7 @@ Single-binary lookups also detect these via path heuristics (no scanning require
 
 1. **Single lookup** (`wherearethey rg`) — resolves the binary with `which`, follows symlinks, and matches the resolved path against known install locations.
 2. **Full scan** (`--all`) — queries each package manager's own listing command and scans known bin directories.
-3. **Orphan detection** (`--orphans`) — compares every binary in `$PATH` against the full scan results; anything unclaimed and unrecognised is an orphan.
+3. **Unmanaged detection** (`--unmanaged`) — compares every binary in `$PATH` against the full scan results; anything unclaimed is not managed by any known package manager.
 4. **Install tracking** (`hook zsh`) — shell function wrappers intercept install/uninstall commands and log them to `~/.wherearethey/history.json`.
 
 ---
