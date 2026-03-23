@@ -29,13 +29,20 @@ cargo install --path .
 
 The binary lands in `~/.cargo/bin/wherearethey`. Make sure `~/.cargo/bin` is in your `PATH`.
 
-### Uninstall
+### Uninstall (Homebrew)
+
+```sh
+brew uninstall wherearethey
+brew untap babyghost-ys/tap  # optional, removes the tap
+```
+
+### Uninstall (from source)
 
 ```sh
 cargo uninstall wherearethey
 ```
 
-To also remove tracked history:
+After uninstalling (either method), you can also remove tracked data:
 
 ```sh
 rm -rf ~/.wherearethey
