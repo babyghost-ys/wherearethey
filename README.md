@@ -6,6 +6,15 @@ Ever typed `which ffmpeg` and got `/opt/homebrew/bin/ffmpeg` but still had no id
 
 ## Install
 
+### Homebrew (recommended)
+
+```sh
+brew tap babyghost-ys/tap
+brew install wherearethey
+```
+
+No Rust required — this downloads a pre-built binary.
+
 ### From source (requires Rust)
 
 ```sh
@@ -13,7 +22,7 @@ Ever typed `which ffmpeg` and got `/opt/homebrew/bin/ffmpeg` but still had no id
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Clone and build
-git clone https://github.com/peterleung/wherearethey.git
+git clone https://github.com/babyghost-ys/wherearethey.git
 cd wherearethey
 cargo install --path .
 ```
